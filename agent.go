@@ -248,6 +248,9 @@ func (a *Agent) streamSSE(ctx context.Context, prompt string, ch chan<- *Event) 
 		// Ignore "event:", "id:", "retry:" fields
 	}
 
+	if err := scanner.Err(); err != nil {
+		ch <- errorEvent("STREAM_ERROR", err.Error())
+	}
 	// Flush remaining data
 	if dataBuf.Len() > 0 {
 		var ev Event
