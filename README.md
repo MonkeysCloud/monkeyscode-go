@@ -1,14 +1,22 @@
 # MonkeysCode Go SDK
 
-Official Go SDK for [MonkeysCode](https://monkeyscode.com) — programmatic agent automation.
-
-## Installation
-
 ```bash
-go get github.com/MonkeysCloud/monkeyscode-go
+go get github.com/MonkeysCloud/monkeyscode-go@latest
 ```
 
-## Quick Start
+Run the MonkeysCode agent from Go. Standard library only; Go 1.22+.
+
+`Query` and `Open` drive the `mc` CLI installed **on this machine**, so your
+settings, permission rules, hooks and MCP servers apply, and every tool call
+the agent wants to make can be approved or refused from your code. They need
+`mc` 1.0.0 or newer:
+
+```bash
+npm i -g monkeyscode-cli@latest
+mc auth login            # or set MONKEYSCODE_API_KEY
+```
+
+## One prompt
 
 ```go
 package main
@@ -22,70 +30,114 @@ import (
 )
 
 func main() {
-	client, err := monkeyscode.NewClient(&monkeyscode.Config{
-		APIKey: "your-api-key", // or set MONKEYSCODE_API_KEY env var
+	ctx := context.Background()
+	events, sess, err := monkeyscode.Query(ctx, "fix the failing test", monkeyscode.CLIOptions{
+		AllowedTools: []string{"read_file", "run_command(npm test:*)"},
+		MaxCostUSD:   1,
+		CanUseTool: func(ctx context.Context, tool string, input map[string]any, pc monkeyscode.PermissionContext) monkeyscode.PermissionResult {
+			if tool == "edit_file" {
+				return monkeyscode.Allow()
+			}
+			return monkeyscode.Deny("read-only please")
+		},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	agent := client.Agent("./my-project")
-
-	// Synchronous — wait for completion
-	result, err := agent.Run(context.Background(), "Add error handling to main.go")
-	if err != nil {
-		log.Fatal(err)
+	for ev := range events {
+		if ev.Type == "result" {
+			fmt.Println(ev.Result.Result, ev.Result.CostUSD)
+		}
 	}
-	fmt.Printf("✅ %s (cost: $%.4f)\n", result.Summary, result.Cost)
+	if err := sess.Wait(); err != nil {
+		log.Fatal(err) // *ProcessError or *SchemaError
+	}
+	fmt.Println("exit code:", sess.ExitCode())
 }
 ```
 
-## Streaming Events
+## Several turns
 
-```go
-for ev := range agent.Stream(ctx, "Refactor the auth module") {
-    switch ev.Type {
-    case monkeyscode.EventText:
-        fmt.Print(ev.Content)
-    case monkeyscode.EventToolCall:
-        fmt.Printf("🔧 %s\n", ev.Tool)
-    case monkeyscode.EventFileEdit:
-        fmt.Printf("📝 %s (+%d/-%d)\n", ev.Path, ev.LinesAdded, ev.LinesRemoved)
-    case monkeyscode.EventComplete:
-        fmt.Printf("\n✅ Done: %s\n", ev.Summary)
-    case monkeyscode.EventError:
-        fmt.Printf("❌ Error: %s\n", ev.Message)
-    }
-}
-```
+`Open(ctx, opts)` starts an idle session. Call `sess.Send(text)` for each
+turn and read `events` up to that turn's `result`.
 
-## Goal Mode
+- `sess.Interrupt()` stops the current turn only.
+- `sess.End()` closes the session once pending turns finish.
+- `sess.Close()`, or cancelling `ctx`, kills it.
 
-Run iteratively until a verification command passes:
+## Permissions
 
-```go
-result, err := agent.Goal(ctx, "Fix all failing tests", monkeyscode.GoalOptions{
-    VerifyCommand: "go test ./...",
-    MaxIterations: 5,
-    MaxCost:       1.0, // USD
-})
-fmt.Printf("Goal met: %v (%d iterations)\n", result.GoalMet, result.Iterations)
-```
+With `CanUseTool` set, every tool call that your settings don't already allow
+or deny is sent to your function, which returns `Allow()`, `Deny(reason)`, or
+`AllowWith(input)` to allow with rewritten input. A panicking callback denies. Without a
+callback, those calls are denied and the result says how to allow them.
 
-## Configuration
+## Errors and exit codes
 
-```go
-cfg := &monkeyscode.Config{
-    APIKey:          "your-key",          // Required (or MONKEYSCODE_API_KEY)
-    ProxyURL:        "https://api.monkeyscode.com", // Default
-    Model:           "capuchin-reason",   // Default
-    Timeout:         5 * time.Minute,     // Default
-    MaxTurns:        50,                  // Default
-    Sandboxed:       true,                // Default
-    PermissionsMode: "auto-approve",      // Default
-}
-```
+`sess.Wait()` returns:
+
+- `*ProcessError`: `mc` could not start, or exited without a result.
+  `errors.Is(err, monkeyscode.ErrCLITooOld)` means the installed `mc`
+  predates this protocol; upgrade it as above.
+- `*SchemaError`: `mc` speaks a newer event schema than this SDK. Upgrade
+  the SDK.
+
+A run that finishes but fails is not an error from `Wait`. Check
+`sess.ExitCode()`:
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | runtime error (model, tool or network failure after retries) |
+| `2` | usage error (bad flags or options) |
+| `3` | authentication error (not logged in) |
+| `4` | quota or plan limit reached |
+| `5` | `MaxCostUSD` / `MaxTokens` guard tripped |
+| `6` | permission denied (every mutating tool call was refused) |
+| `124` | `TimeoutMs` reached |
+| `130` | interrupted |
+
+`MaxCostUSD` is checked after each model response, so a run can go over by
+at most one response. For a model the CLI has no price for, the cost can only
+be enforced if the endpoint reports it; set `MaxTokens` as well.
+
+## Finding `mc`
+
+`PathToMc`, then `$MC_PATH`, then `mc` on `PATH`. The events are the ones
+`mc -p -o stream-json` prints, at `schema_version` 1
+(`monkeyscode.SupportedSchemaVersion`).
+
+## `Client` (hosted API)
+
+`NewClient(Options{...})` and `Client.Run` / `Client.Stream` call a hosted
+run endpoint that is not deployed yet. Against the default endpoint they
+return an error wrapping `ErrHostedRunUnavailable`. Use `Query` / `Open`.
+
+The rest of the package (runs, sessions, hooks, MCP, sandbox, telemetry,
+SARIF/CI helpers) is documented on
+[pkg.go.dev](https://pkg.go.dev/github.com/MonkeysCloud/monkeyscode-go).
+
+## Upgrading from v0.1.0
+
+v1.0.0 replaces the v0.1.0 API, which only ever talked to the hosted
+endpoint above:
+
+| v0.1.0 | v1.0.0 |
+|---|---|
+| `NewClient(&Config{...})` returning `(*Client, error)` | `Query` / `Open` with `CLIOptions`. `NewClient(Options{...})` still exists for the hosted API and returns `*Client` |
+| `DefaultConfig()` | zero-value `CLIOptions{}` |
+| `client.Agent(dir).Run(ctx, p)` | `Query(ctx, p, CLIOptions{Cwd: dir})` |
+| `agent.Stream(ctx, p)` | the `events` channel from `Query` / `Open` |
+| `agent.Goal(...)`, `GoalOptions`, `GoalResult` | removed |
+| `RunResult` | `CLIResult` (`ev.Result`, `sess.LastResult()`) |
+
+Pin `@v0.1.0` if you need the old API.
+
+## Links
+
+- [MonkeysCode CLI](https://monkeyscode.com/docs/code-agent/cli)
+- [Changelog](CHANGELOG.md)
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
