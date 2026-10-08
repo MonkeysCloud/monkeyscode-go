@@ -112,6 +112,8 @@ type CLIResult struct {
 	ExitCode          int                `json:"exit_code"`
 	Error             string             `json:"error,omitempty"`
 	SchemaErrors      []string           `json:"schema_errors,omitempty"`
+	// PlanRequired is set when Auto mode needs a paid plan (error_quota, exit 4).
+	PlanRequired *PlanRequired `json:"plan_required,omitempty"`
 }
 
 // CLIInit is the `system/init` event.
@@ -128,6 +130,17 @@ type CLIInit struct {
 	ForkedFrom     string              `json:"forked_from,omitempty"`
 }
 
+// CLIRoute is Auto mode's `system/route` event: the model one request ran
+// on. Informational; manual models never get it.
+type CLIRoute struct {
+	Requested       string `json:"requested"`
+	Routed          string `json:"routed"`
+	Reason          string `json:"reason"`
+	Phase           string `json:"phase,omitempty"`
+	EscalationsUsed int    `json:"escalations_used"`
+	ResetAt         string `json:"reset_at,omitempty"`
+}
+
 // CLIEvent is one stream-json line. Type is "system", "assistant", "user",
 // "result" or "error"; the matching field is set. Raw keeps the original line.
 type CLIEvent struct {
@@ -137,8 +150,10 @@ type CLIEvent struct {
 	Init      *CLIInit
 	Message   *CLIMessage
 	Result    *CLIResult
-	Error     string
-	Raw       json.RawMessage
+	// Route is set for `system/route` (Auto mode).
+	Route *CLIRoute
+	Error string
+	Raw   json.RawMessage
 }
 
 // ParseCLIEvent decodes one stream-json line.
@@ -159,6 +174,12 @@ func ParseCLIEvent(line []byte) (CLIEvent, error) {
 		ev.Init = &CLIInit{}
 		if err := json.Unmarshal(line, ev.Init); err != nil {
 			return ev, err
+		}
+	case head.Type == "system" && head.Subtype == "route":
+		r := &CLIRoute{}
+		// A malformed route line is informational: keep the event, skip Route.
+		if err := json.Unmarshal(line, r); err == nil && r.Routed != "" {
+			ev.Route = r
 		}
 	case head.Type == "result":
 		ev.Result = &CLIResult{}
@@ -346,6 +367,69 @@ func (e *ProcessError) Error() string {
 		return e.Message + "\n" + e.StderrTail
 	}
 	return e.Message
+}
+
+// PlanRequired is the server's plan-required card (402 plan_required, Auto
+// mode). The text is server-owned; apps show it as is.
+type PlanRequired struct {
+	Code          string `json:"code"`
+	Title         string `json:"title,omitempty"`
+	Message       string `json:"message"`
+	AccountState  string `json:"account_state,omitempty"`
+	RequiredPlan  string `json:"required_plan,omitempty"`
+	UpgradeURL    string `json:"upgrade_url,omitempty"`
+	FallbackModel string `json:"fallback_model,omitempty"` // "" when none is offered
+	FallbackLabel string `json:"fallback_label,omitempty"`
+}
+
+// PlanRequiredError: the model (Auto mode) needs a paid plan (exit 4).
+// It unwraps to a *ProcessError, so existing errors.As(err, &*ProcessError)
+// checks still match it.
+type PlanRequiredError struct {
+	Plan PlanRequired
+	proc *ProcessError
+}
+
+// NewPlanRequiredError builds the error for a plan card and exit code.
+func NewPlanRequiredError(p PlanRequired, exitCode int) *PlanRequiredError {
+	msg := p.Message
+	if p.Title != "" {
+		msg = p.Title + ": " + p.Message
+	}
+	return &PlanRequiredError{Plan: p, proc: &ProcessError{Message: msg, ExitCode: exitCode}}
+}
+
+func (e *PlanRequiredError) Error() string { return e.proc.Error() }
+
+// Unwrap returns the underlying *ProcessError (exit code 4).
+func (e *PlanRequiredError) Unwrap() error { return e.proc }
+
+// UpgradeURL is the absolute upgrade link, or "" when the server sent none.
+func (e *PlanRequiredError) UpgradeURL() string {
+	u := e.Plan.UpgradeURL
+	if strings.HasPrefix(u, "/") {
+		return "https://monkeyscode.com" + u
+	}
+	return u
+}
+
+// RequireSuccess returns a *PlanRequiredError for a plan-gated result, a
+// *ProcessError for any other error result, and nil on success.
+func RequireSuccess(r *CLIResult) error {
+	if r == nil {
+		return &ProcessError{Message: "no result", ExitCode: -1}
+	}
+	if r.PlanRequired != nil {
+		return NewPlanRequiredError(*r.PlanRequired, r.ExitCode)
+	}
+	if r.IsError {
+		msg := r.Error
+		if msg == "" {
+			msg = "mc result " + r.Subtype
+		}
+		return &ProcessError{Message: msg, ExitCode: r.ExitCode}
+	}
+	return nil
 }
 
 // ── Session ─────────────────────────────────────────────────────────

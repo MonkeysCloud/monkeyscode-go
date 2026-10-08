@@ -101,6 +101,35 @@ A run that finishes but fails is not an error from `Wait`. Check
 at most one response. For a model the CLI has no price for, the cost can only
 be enforced if the endpoint reports it; set `MaxTokens` as well.
 
+`monkeyscode.RequireSuccess(result)` turns an error result into an error:
+a `*PlanRequiredError` for a plan-gated one (below), a `*ProcessError`
+otherwise, and `nil` on success.
+
+## Using Auto mode
+
+Auto mode lets MonkeysCode pick the model for each step: Capuchin by default,
+a frontier model only when the task needs it. Set `Model: "auto-mode"` (or
+`"monkeyscode-auto"`), or `"auto-max"` for Max quality. The plain `"auto"`
+still means your default model, not Auto mode. Auto needs a Pro plan or
+above (Max: Pro+); on other plans the result has exit code 4 and
+`Result.PlanRequired` set.
+
+```go
+err := monkeyscode.RequireSuccess(result)
+var pr *monkeyscode.PlanRequiredError
+if errors.As(err, &pr) {
+	fmt.Println(pr.Error(), pr.UpgradeURL())
+	if pr.Plan.FallbackModel != "" { // e.g. capuchin-reason
+		// run again with Model: pr.Plan.FallbackModel
+	}
+}
+```
+
+`*PlanRequiredError` unwraps to a `*ProcessError`, so existing `errors.As`
+checks still match. Each `system/route` event has `ev.Route` set (requested,
+routed, reason, escalations used); it is informational, and the routed model
+can change from step to step.
+
 ## Finding `mc`
 
 `PathToMc`, then `$MC_PATH`, then `mc` on `PATH`. The events are the ones

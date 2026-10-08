@@ -3,6 +3,18 @@
 `github.com/MonkeysCloud/monkeyscode-go`. Semantic versioning from v1.0.0:
 breaking API changes only in a new major version (a `/v2` module path).
 
+## Unreleased (planned v1.1.0, with the Auto mode release)
+
+Version is not bumped yet: bumping `Version` in `version.go` publishes.
+The release runbook does it on release day.
+
+### Added
+- Auto mode: `CLIResult.PlanRequired` (the server's plan card when Auto needs
+  a paid plan, exit 4), `PlanRequiredError` (unwraps to `*ProcessError`) and
+  `RequireSuccess(result)`.
+- `CLIEvent.Route` for `system/route` events (which model ran a step).
+- README: "Using Auto mode".
+
 ## v1.0.0
 
 The first release published from `packages/sdk-go` in the MonkeysCode
